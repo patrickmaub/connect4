@@ -28,6 +28,6 @@ A Connect 4 AI implementation using Deep Learning and Monte Carlo Tree Search (M
   - AI vs AI demonstration mode
   - Training progress visualization
 
-## Installation
+# Installatoin
 
-1. Clone the repository:
+Clone, pip install -r requirements.txt and run python main.py
