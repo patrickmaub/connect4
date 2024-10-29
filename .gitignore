@@ -1,0 +1,24 @@
+# Checkpoints directory
+checkpoints/
+
+# TensorBoard logs
+runs/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.env/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
