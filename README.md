@@ -28,6 +28,8 @@ A Connect 4 AI implementation using Deep Learning and Monte Carlo Tree Search (M
   - AI vs AI demonstration mode
   - Training progress visualization
 
-# Installatoin
+# Installation
 
-Clone, pip install -r requirements.txt and run python main.py
+Clone, `pip install -r requirements.tx`t and run `python main.py`
+
+Then to view tensorboard use `tensorboard --logdir=runs/connect4_training`
