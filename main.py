@@ -12,6 +12,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 import os
 import shutil
+from torch.cuda.amp import autocast, GradScaler
+import torch.backends.cudnn as cudnn
 
 # Constants
 BOARD_ROWS = 6
@@ -23,8 +25,27 @@ DRAW_SCORE = 0.5
 LOSS_SCORE = 0.0
 
 # Add near the top of the file, after imports
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+elif torch.backends.mps.is_available():
+    DEVICE = torch.device("mps")
+else:
+    DEVICE = torch.device("cpu")
 print(f"Using device: {DEVICE}")
+
+# After the DEVICE definition, add these optimizations for CUDA
+if torch.cuda.is_available():
+    # Enable CUDA optimizations
+    torch.backends.cuda.matmul.allow_tf32 = True  # Allow TF32 on matmul
+    torch.backends.cudnn.allow_tf32 = True        # Allow TF32 on cudnn
+    cudnn.benchmark = True                        # Enable cudnn autotuner
+    torch.cuda.set_device(0)                      # Ensure we're using GPU 0
+    
+    # Print GPU info
+    gpu_properties = torch.cuda.get_device_properties(0)
+    print(f"Using GPU: {gpu_properties.name}")
+    print(f"GPU Memory: {gpu_properties.total_memory / 1024**3:.2f} GB")
+    print(f"CUDA Capability: {gpu_properties.major}.{gpu_properties.minor}")
 
 class Connect4State:
     def __init__(self):
@@ -147,16 +168,17 @@ class Connect4Net(nn.Module):
         return policy, value
 
 class MCTS:
-    def __init__(self, net, num_simulations=800, c_puct=1.0):
+    def __init__(self, net, num_simulations=1600, c_puct=1.0, batch_size=64):
         self.net = net
         self.num_simulations = num_simulations
         self.c_puct = c_puct
-        self.Qsa = defaultdict(float)  # Q values for state-action pairs
-        self.Nsa = defaultdict(int)    # Number of visits for state-action pairs
-        self.Ns = defaultdict(int)     # Number of visits for states
-        self.Ps = {}                   # Initial policy probabilities for states
-        self.valid_moves = {}          # Valid moves for states
-        self.states = {}               # Game states
+        self.batch_size = batch_size
+        self.Qsa = defaultdict(float)
+        self.Nsa = defaultdict(int)
+        self.Ns = defaultdict(int)
+        self.Ps = {}
+        self.valid_moves = {}
+        self.states = {}
         
     def get_action_prob(self, state, temp=1):
         for _ in range(self.num_simulations):
@@ -316,16 +338,20 @@ def self_play(net, num_games=100, mcts_simulations=800):
     return examples
 # [Previous code remains the same until train_network function]
 
-def train_network(net, examples, num_epochs=10, batch_size=32, lr=0.001, writer=None):
+def train_network(net, examples, num_epochs=10, batch_size=256, lr=0.001, writer=None):
     optimizer = optim.Adam(net.parameters(), lr=lr)
+    scaler = GradScaler()  # For mixed precision training
     pi_criterion = nn.CrossEntropyLoss()
     v_criterion = nn.MSELoss()
     
     local_writer = writer
     if local_writer is None:
         local_writer = SummaryWriter('runs/connect4_training', flush_secs=1)
-        
+    
     global_step = 0
+    
+    # Calculate optimal number of workers for DataLoader
+    num_workers = min(8, os.cpu_count() or 1)
     
     for epoch in range(num_epochs):
         net.train()
@@ -344,17 +370,21 @@ def train_network(net, examples, num_epochs=10, batch_size=32, lr=0.001, writer=
             pi_batch = torch.stack([x[1] for x in batch]).to(DEVICE)
             v_batch = torch.stack([x[2] for x in batch]).to(DEVICE)
             
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
             
-            out_pi, out_v = net(state_batch)
-            pi_loss = pi_criterion(out_pi, pi_batch)
-            v_loss = v_criterion(out_v.squeeze(), v_batch.squeeze())
-            total_loss = pi_loss + v_loss
+            # Use autocast for mixed precision training
+            with autocast():
+                out_pi, out_v = net(state_batch)
+                pi_loss = pi_criterion(out_pi, pi_batch)
+                v_loss = v_criterion(out_v.squeeze(), v_batch.squeeze())
+                total_loss = pi_loss + v_loss
             
-            total_loss.backward()
-            optimizer.step()
+            # Scale loss and backprop
+            scaler.scale(total_loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             
-            # Log batch-level metrics
+            # Log metrics
             local_writer.add_scalar('Loss/Policy/Step', pi_loss.item(), global_step)
             local_writer.add_scalar('Loss/Value/Step', v_loss.item(), global_step)
             local_writer.add_scalar('Loss/Total/Step', total_loss.item(), global_step)
@@ -363,8 +393,12 @@ def train_network(net, examples, num_epochs=10, batch_size=32, lr=0.001, writer=
             total_v_loss += v_loss.item()
             batch_count += 1
             global_step += 1
+            
+            # Optional: Print progress every N batches
+            if batch_count % 10 == 0:
+                print(f'Epoch {epoch+1}, Batch {batch_count}, Loss: {total_loss.item():.4f}')
         
-        # Log epoch-level metrics
+        # Log epoch metrics
         avg_pi_loss = total_pi_loss / batch_count
         avg_v_loss = total_v_loss / batch_count
         
@@ -375,6 +409,10 @@ def train_network(net, examples, num_epochs=10, batch_size=32, lr=0.001, writer=
         print(f'Epoch {epoch+1}/{num_epochs}:')
         print(f'Average policy loss: {avg_pi_loss:.4f}')
         print(f'Average value loss: {avg_v_loss:.4f}')
+        
+        # Force CUDA synchronization periodically
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
     
     local_writer.flush()
 
