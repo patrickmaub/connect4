@@ -22,6 +22,10 @@ WIN_SCORE = 1.0
 DRAW_SCORE = 0.5
 LOSS_SCORE = 0.0
 
+# Add near the top of the file, after imports
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {DEVICE}")
+
 class Connect4State:
     def __init__(self):
         self.board = np.zeros((BOARD_ROWS, BOARD_COLS), dtype=np.int8)
@@ -120,6 +124,9 @@ class Connect4Net(nn.Module):
         self.value_fc2 = nn.Linear(256, 1)
         
     def forward(self, x):
+        # Move input tensor to same device as model
+        x = x.to(next(self.parameters()).device)
+        
         # Common layers
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
@@ -183,7 +190,7 @@ class MCTS:
             self.valid_moves[s] = state.get_valid_moves()
             
             # Neural network evaluation
-            state_tensor = state.get_state_tensor().unsqueeze(0)
+            state_tensor = state.get_state_tensor().unsqueeze(0).to(DEVICE)
             with torch.no_grad():
                 log_ps, v = self.net(state_tensor)
                 self.Ps[s] = torch.exp(log_ps).cpu().numpy()[0]
@@ -333,9 +340,9 @@ def train_network(net, examples, num_epochs=10, batch_size=32, lr=0.001, writer=
             batch_indices = indices[i:i+batch_size]
             batch = [examples[idx] for idx in batch_indices]
             
-            state_batch = torch.stack([x[0] for x in batch])
-            pi_batch = torch.stack([x[1] for x in batch])
-            v_batch = torch.stack([x[2] for x in batch])
+            state_batch = torch.stack([x[0] for x in batch]).to(DEVICE)
+            pi_batch = torch.stack([x[1] for x in batch]).to(DEVICE)
+            v_batch = torch.stack([x[2] for x in batch]).to(DEVICE)
             
             optimizer.zero_grad()
             
@@ -403,7 +410,7 @@ def train_model(net, num_iterations=100, num_episodes=100, mcts_simulations=800)
         
         # Evaluation phase (optional)
         if iteration > 0 and iteration % 5 == 0:
-            prev_net = Connect4Net()
+            prev_net = Connect4Net().to(DEVICE)
             prev_net.load_state_dict(torch.load(f'checkpoints/connect4_model_iter_{iteration-5}.pt')['model_state_dict'])
             
             wins = 0
@@ -494,7 +501,7 @@ def main():
     gui = Connect4GUI()
     
     # Initialize network
-    net = Connect4Net()
+    net = Connect4Net().to(DEVICE)
     
     # Create checkpoints directory if it doesn't exist
     os.makedirs('checkpoints', exist_ok=True)
